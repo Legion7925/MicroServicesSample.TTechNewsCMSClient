@@ -1,7 +1,12 @@
 
 
+using OpenTelemetry.Logs;
+using OpenTelemetry.Metrics;
+using OpenTelemetry.Resources;
+using OpenTelemetry.Trace;
 using Serilog;
 using Serilog.Sinks.Elasticsearch;
+using System.IdentityModel.Tokens.Jwt;
 
 Log.Logger = new LoggerConfiguration()
     .WriteTo.Console()
@@ -11,6 +16,27 @@ Log.Information("Starting up");
 try
 {
     var builder = WebApplication.CreateBuilder(args);
+
+    const string serviceName = "TTechNewsCMSClient";
+
+    builder.Logging.AddOpenTelemetry(options =>
+    {
+        options
+            .SetResourceBuilder(
+                ResourceBuilder.CreateDefault()
+                    .AddService(serviceName))
+            .AddConsoleExporter();
+    });
+    builder.Services.AddOpenTelemetry()
+          .ConfigureResource(resource => resource.AddService(serviceName))
+          .WithTracing(tracing => tracing
+              .AddAspNetCoreInstrumentation()
+              .AddConsoleExporter()
+              .AddJaegerExporter()
+              .AddSqlClientInstrumentation())
+          .WithMetrics(metrics => metrics
+              .AddAspNetCoreInstrumentation()
+              .AddConsoleExporter());
 
     builder.Host.UseSerilog((ctx, lc) => lc
   .WriteTo.Elasticsearch(new ElasticsearchSinkOptions(new Uri("http://localhost:9200"))
@@ -27,6 +53,26 @@ try
 
     // Add services to the container.
     builder.Services.AddControllersWithViews();
+    JwtSecurityTokenHandler.DefaultMapInboundClaims = false;
+    builder.Services.AddAuthentication(c =>
+    {
+        c.DefaultScheme = "Cookies";
+        c.DefaultChallengeScheme = "oidc";
+    }).AddCookie("Cookies").AddOpenIdConnect("oidc" , c=>
+    {
+        c.Authority = "https://localhost:5001/";
+        c.ClientId = "newscmsClient";
+        c.ClientSecret = "newscmsClient";
+        c.ResponseType = "code";
+        c.Scope.Clear();
+        c.Scope.Add("openid");
+        c.Scope.Add("profile");
+        c.Scope.Add("basicinfo");
+        c.Scope.Add("newscms");
+        c.Scope.Add("offline_access");
+        c.GetClaimsFromUserInfoEndpoint = true;
+        c.SaveTokens = true;
+    });
     builder.Services.AddHttpClient("bi", c =>
     {
         c.BaseAddress = new Uri("http://localhost:7300/bi/");
@@ -34,6 +80,13 @@ try
     builder.Services.AddHttpClient("news", c =>
     {
         c.BaseAddress = new Uri("http://localhost:7300/news/");
+    });
+    builder.Services.AddHttpClient("oAuth", c =>
+    {
+        c.BaseAddress = new Uri("https://localhost:5001/");
+    }).ConfigurePrimaryHttpMessageHandler(() => new HttpClientHandler
+    {
+        ServerCertificateCustomValidationCallback = HttpClientHandler.DangerousAcceptAnyServerCertificateValidator
     });
     builder.Services.AddHealthChecks();
     var app = builder.Build();
@@ -51,12 +104,13 @@ try
 
     app.UseRouting();
 
+    app.UseAuthentication();
     app.UseAuthorization();
     app.MapHealthChecks("/health/live");
 
     app.MapControllerRoute(
         name: "default",
-        pattern: "{controller=Home}/{action=Index}/{id?}");
+        pattern: "{controller=Home}/{action=Index}/{id?}").RequireAuthorization();
 
     app.Run();
 }
